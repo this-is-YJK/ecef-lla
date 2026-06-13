@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D ECEF ↔ LLA Converter</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #1e1e1e;
+            color: #f4f4f9;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h2 {
+            margin-top: 0;
+            color: #61dafb;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            width: 100%;
+            max-width: 1000px;
+        }
+        .panels {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            flex: 1;
+            min-width: 300px;
+        }
+        .panel {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .panel h3 {
+            margin-top: 0;
+            border-bottom: 2px solid #61dafb;
+            padding-bottom: 10px;
+            color: #61dafb;
+        }
+        .form-group {
+            margin-bottom: 12px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #444;
+            background: #1e1e1e;
+            color: #fff;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-family: monospace;
+            font-size: 1em;
+        }
+        input:focus {
+            border-color: #61dafb;
+            outline: none;
+        }
+        #globe-container {
+            flex: 2;
+            min-width: 400px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #444;
+            min-height: 500px;
+            position: relative;
+        }
+        .legend {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            pointer-events: none;
+        }
+        .legend span { display: block; margin-bottom: 4px; }
+        .c-red { color: #ff5555; }
+        .c-green { color: #55ff55; }
+        .c-blue { color: #5555ff; }
+    </style>
+</head>
+<body>
+
+    <h2>3D ECEF ↔ LLA Converter</h2>
+
+    <div class="container">
+        <div class="panels">
+            <div class="panel">
+                <h3>LLA (Geodetic)</h3>
+                <div class="form-group">
+                    <label for="lat">Latitude (Degrees)</label>
+                    <input type="number" id="lat" step="any" value="12.9716">
+                </div>
+                <div class="form-group">
+                    <label for="lon">Longitude (Degrees)</label>
+                    <input type="number" id="lon" step="any" value="77.5946">
+                </div>
+                <div class="form-group">
+                    <label for="alt">Altitude (Meters)</label>
+                    <input type="number" id="alt" step="any" value="920.0">
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>ECEF (Cartesian)</h3>
+                <div class="form-group">
+                    <label for="x">X (Meters)</label>
+                    <input type="number" id="x" step="any">
+                </div>
+                <div class="form-group">
+                    <label for="y">Y (Meters)</label>
+                    <input type="number" id="y" step="any">
+                </div>
+                <div class="form-group">
+                    <label for="z">Z (Meters)</label>
+                    <input type="number" id="z" step="any">
+                </div>
+            </div>
+        </div>
+
+        <div id="globe-container">
+            <div class="legend">
+                <span class="c-red">■ X-Axis (Prime Meridian)</span>
+                <span class="c-green">■ Y-Axis (90° East)</span>
+                <span class="c-blue">■ Z-Axis (North Pole)</span>
+                <span style="color: yellow; margin-top: 8px;">■ Your Coordinate</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // --- 1. Math & Constants (WGS84) ---
+        const a = 6378137.0; 
+        const e2 = 0.00669437999014; 
+        const b = Math.sqrt(a * a * (1 - e2)); 
+        const ep2 = (a * a - b * b) / (b * b); 
+
+        // Scale factor for 3D rendering (meters to km) to prevent WebGL precision issues
+        const SCALE = 0.001; 
+
+        // DOM Elements
+        const inputsLLA = {
+            lat: document.getElementById('lat'),
+            lon: document.getElementById('lon'),
+            alt: document.getElementById('alt')
+        };
+        const inputsECEF = {
+            x: document.getElementById('x'),
+            y: document.getElementById('y'),
+            z: document.getElementById('z')
+        };
+
+        let isUpdating = false;
+
+        function llaToEcef(lat, lon, alt) {
+            const phi = lat * Math.PI / 180.0;
+            const lam = lon * Math.PI / 180.0;
+            const sinPhi = Math.sin(phi);
+            const cosPhi = Math.cos(phi);
+            const N = a / Math.sqrt(1 - e2 * sinPhi * sinPhi);
+
+            const x = (N + alt) * cosPhi * Math.cos(lam);
+            const y = (N + alt) * cosPhi * Math.sin(lam);
+            const z = (N * (1 - e2) + alt) * sinPhi;
+            
+            return { x, y, z };
+        }
+
+        function ecefToLla(x, y, z) {
+            const p = Math.sqrt(x * x + y * y);
+            if (p === 0) {
+                return { lat: (z > 0 ? 90 : -90), lon: 0, alt: Math.abs(z) - b };
+            }
+            const th = Math.atan2(a * z, b * p);
+            const sinTh = Math.sin(th);
+            const cosTh = Math.cos(th);
+            const lonRad = Math.atan2(y, x);
+            const latRad = Math.atan2(
+                z + ep2 * b * Math.pow(sinTh, 3),
+                p - e2 * a * Math.pow(cosTh, 3)
+            );
+            const sinLat = Math.sin(latRad);
+            const N = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+            
+            return {
+                lat: latRad * 180.0 / Math.PI,
+                lon: lonRad * 180.0 / Math.PI,
+                alt: p / Math.cos(latRad) - N
+            };
+        }
+
+        // --- 2. Three.js 3D Setup ---
+        const container = document.getElementById('globe-container');
+        const scene = new THREE.Scene();
+        
+        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 1, 100000);
+        camera.position.set(15000, 10000, 15000); // Placed in space looking at Earth
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // ECEF Coordinate System Group
+        // We rotate this group so its local Z (North) points to Global Y (Up)
+        // This makes the standard OrbitControls feel natural (spinning left/right orbits the equator)
+        const earthGroup = new THREE.Group();
+        earthGroup.rotation.x = -Math.PI / 2; 
+        scene.add(earthGroup);
+
+        // Earth Wireframe Sphere
+        const earthGeo = new THREE.SphereGeometry(a * SCALE, 32, 32);
+        const earthMat = new THREE.MeshBasicMaterial({ 
+            color: 0x225588, 
+            wireframe: true,
+            transparent: true,
+            opacity: 0.4
+        });
+        const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+        earthGroup.add(earthMesh);
+
+        // Coordinate Axes (X=Red, Y=Green, Z=Blue)
+        // Scaled to be slightly larger than the Earth
+        const axesHelper = new THREE.AxesHelper(a * SCALE * 1.3);
+        earthGroup.add(axesHelper);
+
+        // The Data Point Marker
+        const pointGeo = new THREE.SphereGeometry(200, 16, 16);
+        const pointMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const dataPoint = new THREE.Mesh(pointGeo, pointMat);
+        earthGroup.add(dataPoint);
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle Window Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+
+        // --- 3. Binding & Update Logic ---
+
+        function update3DPoint(ecef) {
+            // Apply scale factor. Coordinates are mapped directly 
+            // because the earthGroup is rotated to match ECEF axes.
+            dataPoint.position.set(
+                ecef.x * SCALE, 
+                ecef.y * SCALE, 
+                ecef.z * SCALE
+            );
+        }
+
+        function updateFromLLA() {
+            if (isUpdating) return;
+            const lat = parseFloat(inputsLLA.lat.value);
+            const lon = parseFloat(inputsLLA.lon.value);
+            const alt = parseFloat(inputsLLA.alt.value) || 0;
+
+            if (isNaN(lat) || isNaN(lon)) return;
+
+            isUpdating = true;
+            const ecef = llaToEcef(lat, lon, alt);
+            
+            inputsECEF.x.value = ecef.x.toFixed(4);
+            inputsECEF.y.value = ecef.y.toFixed(4);
+            inputsECEF.z.value = ecef.z.toFixed(4);
+            
+            update3DPoint(ecef);
+            isUpdating = false;
+        }
+
+        function updateFromECEF() {
+            if (isUpdating) return;
+            const x = parseFloat(inputsECEF.x.value);
+            const y = parseFloat(inputsECEF.y.value);
+            const z = parseFloat(inputsECEF.z.value);
+
+            if (isNaN(x) || isNaN(y) || isNaN(z)) return;
+
+            isUpdating = true;
+            const lla = ecefToLla(x, y, z);
+            
+            inputsLLA.lat.value = lla.lat.toFixed(6);
+            inputsLLA.lon.value = lla.lon.toFixed(6);
+            inputsLLA.alt.value = lla.alt.toFixed(4);
+            
+            update3DPoint({x, y, z});
+            isUpdating = false;
+        }
+
+        Object.values(inputsLLA).forEach(input => input.addEventListener('input', updateFromLLA));
+        Object.values(inputsECEF).forEach(input => input.addEventListener('input', updateFromECEF));
+
+        // Initial calculation on load
+        updateFromLLA();
+
+    </script>
+</body>
+</html>
